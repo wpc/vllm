@@ -130,6 +130,9 @@ class MultiModalRegistry:
         if not model_config.is_multimodal_model:
             return False
 
+        if model_config.skip_tokenizer_init:
+            return False
+
         info = self._create_processing_info(model_config, tokenizer=None)
         supported_modalities = info.get_supported_mm_limits()
 
