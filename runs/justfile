@@ -1,0 +1,188 @@
+# -------
+# CONFIG
+# ------
+
+MODEL := "/scratch/models/kimi-k2.5-nvfp4"
+PREC := "fp4"
+LYRIS_IFNAME := "enP22p3s0f1np1"
+PTYCHE_IFNAME := "enP6p3s0f1np1"
+
+# ---
+# ENV
+# ---
+
+SYSTEM_ENV := '''NVIDIA_GDRCOPY=1 \
+NVSHMEM_IB_ENABLE_IBGDA=1 \
+NVSHMEM_BOOTSTRAP_UID_SOCK_IFNAME=''' + PTYCHE_IFNAME + ''' \
+UCX_IB_ROCE_REACHABILITY_MODE=local_subnet \
+VLLM_SKIP_P2P_CHECK=1 \
+GLOO_SOCKET_IFNAME=''' + PTYCHE_IFNAME + ''' \
+NCCL_SOCKET_IFNAME=''' + PTYCHE_IFNAME + ''' \
+NCCL_CUMEM_ENABLE=1 \
+NCCL_MNNVL_ENABLE=1 \
+NCCL_NVLS_ENABLE=1 '''
+
+
+COMMON_VLLM_ENV := '''\
+VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
+VLLM_ATTENTION_BACKEND=FLASHINFER_MLA \
+VLLM_USE_FLASHINFER_MOE_FP4=1 \
+VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL=1 \
+VLLM_FLASHINFER_MOE_BACKEND=latency \
+VLLM_USE_NCCL_SYMM_MEM=1 '''
+
+# Currently there is no prefill or decode specific environment variables
+PREFILL_VLLM_ENV := SYSTEM_ENV + COMMON_VLLM_ENV
+DECODE_VLLM_ENV := SYSTEM_ENV + COMMON_VLLM_ENV
+
+
+# ---------
+# vLLM Args
+# ---------
+
+COMMON_VLLM_ARGS := '''
+--kv-cache-dtype fp8 \
+--tensor-parallel-size 1 \
+--pipeline-parallel-size 1 \
+--enable-expert-parallel \
+--data-parallel-rpc-port 13345 \
+--max-model-len 10240 \
+--trust-remote-code \
+--port 8087 \
+--data-parallel-size-local 4 \
+--disable-uvicorn-access-log \
+--no-enable-prefix-caching \
+--all2all-backend allgather_reducescatter \
+--data-parallel-hybrid-lb \
+--compilation_config.custom_ops+=+quant_fp8,+rms_norm,+rotary_embedding \
+--compilation_config.pass_config.fuse_attn_quant true \
+--compilation_config.pass_config.fuse_allreduce_rms true \
+--async-scheduling '''
+
+PREFILL_VLLM_ARGS := COMMON_VLLM_ARGS + '''\
+--gpu-memory-utilization 0.9 \
+--max-num-batched-tokens 16384 \
+--max-num-seqs 512 \
+--swap-space 16 \
+--enforce-eager '''
+
+DECODE_VLLM_ARGS := COMMON_VLLM_ARGS + '''\
+--compilation-config.cudagraph_mode FULL_DECODE_ONLY \
+--gpu-memory-utilization 0.9 \
+--stream-interval 50 \
+--max-num-seqs 1024 \
+--max-num-batched-tokens 10240 \
+--max-cudagraph-capture-size 1024 '''
+
+# ---
+# PD
+# ---
+
+PD_VLLM_ENV := '''\
+VLLM_NIXL_SIDE_CHANNEL_HOST=`hostname -i` \
+VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
+VLLM_NIXL_ABORT_REQUEST_TIMEOUT=300 '''
+
+DECODE_PD_VLLM_ENV := DECODE_VLLM_ENV + PD_VLLM_ENV
+PREFILL_PD_VLLM_ENV := PREFILL_VLLM_ENV + PD_VLLM_ENV
+
+PD_VLLM_ARGS := '''\
+--kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_both", "kv_load_failure_policy":"fail"}' '''
+
+DECODE_PD_VLLM_ARGS := DECODE_VLLM_ARGS + PD_VLLM_ARGS
+PREFILL_PD_VLLM_ARGS := PREFILL_VLLM_ARGS + PD_VLLM_ARGS
+
+# -------
+# Recipes
+# -------
+
+prefill-master PMA DPS:
+	{{PREFILL_PD_VLLM_ENV}} vllm serve {{MODEL}} \
+		{{PREFILL_PD_VLLM_ARGS}} \
+		--data-parallel-address {{PMA}} \
+		--data-parallel-size {{DPS}} \
+		2>&1 | tee prefill-{{PMA}}-{{DPS}}.log
+
+prefill-worker PMA DPSR DPS:
+	{{PREFILL_PD_VLLM_ENV}} vllm serve {{MODEL}} \
+		{{PREFILL_PD_VLLM_ARGS}} \
+		--data-parallel-address {{PMA}} \
+		--data-parallel-start-rank {{DPSR}} \
+		--data-parallel-size {{DPS}} \
+		2>&1 | tee prefill-{{PMA}}-{{DPS}}-{{DPSR}}.log
+
+
+decode-master DMA DPS:
+	{{DECODE_PD_VLLM_ENV}} vllm serve {{MODEL}} \
+		{{DECODE_PD_VLLM_ARGS}} \
+		--data-parallel-address {{DMA}} \
+		--data-parallel-size {{DPS}} \
+		2>&1 | tee decode-{{DMA}}-{{DPS}}.log
+
+decode-worker DMA DPSR DPS:
+	{{DECODE_PD_VLLM_ENV}} vllm serve {{MODEL}} \
+		{{DECODE_PD_VLLM_ARGS}} \
+		--data-parallel-address {{DMA}} \
+		--data-parallel-start-rank {{DPSR}} \
+		--data-parallel-size {{DPS}} \
+		2>&1 | tee decode-{{DMA}}-{{DPS}}-{{DPSR}}.log
+
+router NUM_PREFILL INTRA_DP *ADDRS:
+	#!/usr/bin/env bash
+	pushd /vllm-workspace/router
+
+	# Split addresses into prefill and decode arrays
+	addrs=({{ADDRS}})
+	prefill_args=""
+	decode_args=""
+
+	for ((i=0; i<{{NUM_PREFILL}}; i++)); do
+		prefill_args+="--prefill ${addrs[$i]} "
+	done
+
+	for ((i={{NUM_PREFILL}}; i<${#addrs[@]}; i++)); do
+		decode_args+="--decode ${addrs[$i]} "
+	done
+
+	RUST_LOG=warn \
+	cargo run --release -- \
+		--policy round_robin \
+		--vllm-pd-disaggregation \
+		--max-concurrent-requests 16384 \
+		$prefill_args \
+		$decode_args \
+		--host 0.0.0.0 \
+		--port 8192 \
+		--intra-node-data-parallel-size {{INTRA_DP}}
+	popd
+
+bench PMA="" PORT="8087" NP="5120" MC="2048" ISL="1024" OSL="1024" COMMON_PREFIX="0":
+	#!/usr/bin/env bash
+	# Source utils.sh (assumes running from runs/fp4/ directory)
+	source ../utils.sh
+	if [ "$nsys" = "true" ]; then
+		start_profiler_control "{{PMA}}" "{{PORT}}"
+	fi
+	vllm bench serve \
+		--model {{MODEL}} \
+		--host {{PMA}} \
+		--port {{PORT}} \
+		--dataset-name random \
+		--ignore-eos \
+		--trust-remote-code \
+		--request-rate 10000 \
+		--num-prompts {{NP}} \
+		--max-concurrency {{MC}} \
+		--random-input-len {{ISL}} \
+		--random-output-len {{OSL}} \
+		--ready-check-timeout-sec 0 \
+		--random-prefix-len {{COMMON_PREFIX}} \
+		2>&1 | tee bench.log
+
+accuracy MA="" PORT="8087":
+	lm_eval --model local-completions --tasks gsm8k --trust_remote_code --batch_size auto \
+		--model_args base_url=http://{{MA}}:{{PORT}}/v1/completions,pretrained={{MODEL}},model={{MODEL}},add_bos_token=True,tokenized_requests=False,tokenizer_backend=None,num_concurrent=1024,timeout=60000,max_retries=5 \
+		2>&1 | tee eval.log
+
+kill:
+	pkill -9 -f VLLM::EngineCore || echo "All processes stopped"
