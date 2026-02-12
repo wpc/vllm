@@ -113,6 +113,13 @@ class ServingTokens(OpenAIServing):
             sampling_params = request.sampling_params
             if self.force_no_detokenize:
                 sampling_params.detokenize = False
+            # Wire kv_transfer_params into sampling_params for P/D disagg
+            if request.kv_transfer_params:
+                if sampling_params.extra_args is None:
+                    sampling_params.extra_args = {}
+                sampling_params.extra_args["kv_transfer_params"] = (
+                    request.kv_transfer_params
+                )
 
             self._log_inputs(
                 request_id,
