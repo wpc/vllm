@@ -99,6 +99,9 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         engine_prompts = await self._preprocess_completion(
             request,
             prompt_input=request.token_ids,
@@ -145,6 +148,7 @@ class ServingTokens(OpenAIServing):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=request.priority,
+                data_parallel_rank=data_parallel_rank,
             )
 
             result_generator = self.engine_client.generate(
@@ -155,6 +159,7 @@ class ServingTokens(OpenAIServing):
                 trace_headers=trace_headers,
                 priority=request.priority,
                 tokenization_kwargs=tokenization_kwargs,
+                data_parallel_rank=data_parallel_rank,
             )
 
         except ValueError as e:
