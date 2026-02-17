@@ -99,6 +99,9 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
         # completed
         engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
@@ -142,6 +145,7 @@ class ServingTokens(OpenAIServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=request.priority,
+                data_parallel_rank=data_parallel_rank,
             )
 
         except ValueError as e:
