@@ -14,7 +14,7 @@ RUN curl -L -O https://github.com/casey/just/releases/download/1.43.1/just-1.43.
 RUN uv pip uninstall --system flashinfer_python flashinfer-cubin flashinfer-jit-cache
 RUN uv pip install --system --no-deps --no-build-isolation flashinfer_python==v0.6.0rc2 \
     https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.0rc2/flashinfer_cubin-0.6.0rc2-py3-none-any.whl \
-    https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.0rc2/flashinfer_jit_cache-0.6.0rc2+cu129-cp39-abi3-manylinux_2_28_aarch64.whl
+    https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.0rc2/flashinfer_jit_cache-0.6.0rc2+cu130-cp39-abi3-manylinux_2_28_aarch64.whl
 
 
 RUN uv pip uninstall --system nvidia-nvshmem-cu13
@@ -29,3 +29,11 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN git clone -b queue_size https://github.com/minosfuture/router.git --depth 1 && cd router && cargo build --release
 ENV TRITON_PTXAS_PATH /usr/local/cuda/bin/ptxas
 
+RUN pip install --upgrade pip && pip install \
+    "opentelemetry-sdk>=1.26.0,<1.27.0" \
+    "opentelemetry-api>=1.26.0,<1.27.0" \
+    "opentelemetry-exporter-otlp>=1.26.0,<1.27.0" \
+    "opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0" \
+    "opentelemetry-instrumentation" \
+    "opentelemetry-instrumentation-fastapi" \
+    "opentelemetry-instrumentation-starlette"
