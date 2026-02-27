@@ -12,6 +12,7 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -180,6 +181,10 @@ class MultiConnector(KVConnectorBase_V1):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        for c in self._connectors:
+            c.set_host_xfer_buffer_ops(copy_operation)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
