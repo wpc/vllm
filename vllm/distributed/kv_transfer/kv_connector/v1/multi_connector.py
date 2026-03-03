@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -182,6 +183,14 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.register_kv_caches(kv_caches)
 
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """Delegate to first connector that returns handshake metadata."""
+        for c in self._connectors:
+            metadata = c.get_handshake_metadata()
+            if metadata is not None:
+                return metadata
+        return None
+
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         for c in self._connectors:
             c.set_host_xfer_buffer_ops(copy_operation)
@@ -336,6 +345,13 @@ class MultiConnector(KVConnectorBase_V1):
     def update_connector_output(self, connector_output: KVConnectorOutput):
         for c in self._connectors:
             c.update_connector_output(connector_output)
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """Propagate handshake metadata to all connectors."""
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata(metadata)
 
     def request_finished(
         self,
