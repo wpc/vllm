@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokensDetails,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -693,6 +694,7 @@ class OpenAIServingChat(OpenAIServing):
             all_previous_token_ids = None
 
         try:
+            reasoning_parser = None
             if self.reasoning_parser:
                 if tokenizer is None:
                     raise ValueError(
@@ -1349,6 +1351,21 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens
                     )
+                # Count reasoning tokens if reasoning parser is available
+                if reasoning_parser and all_previous_token_ids:
+                    num_reasoning_tokens = 0
+                    for token_ids in all_previous_token_ids:
+                        num_reasoning_tokens += (
+                            reasoning_parser.count_reasoning_tokens(
+                                token_ids
+                            )
+                        )
+                    if num_reasoning_tokens > 0:
+                        final_usage.completion_tokens_details = (
+                            CompletionTokensDetails(
+                                reasoning_tokens=num_reasoning_tokens,
+                            )
+                        )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1423,6 +1440,7 @@ class OpenAIServingChat(OpenAIServing):
 
         assert final_res is not None
 
+        reasoning_parser = None
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
             history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
@@ -1760,6 +1778,17 @@ class OpenAIServingChat(OpenAIServing):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
             )
+        # Count reasoning tokens if reasoning parser is available
+        if reasoning_parser:
+            num_reasoning_tokens = 0
+            for output in final_res.outputs:
+                num_reasoning_tokens += (
+                    reasoning_parser.count_reasoning_tokens(output.token_ids)
+                )
+            if num_reasoning_tokens > 0:
+                usage.completion_tokens_details = CompletionTokensDetails(
+                    reasoning_tokens=num_reasoning_tokens,
+                )
 
         request_metadata.final_usage_info = usage
 

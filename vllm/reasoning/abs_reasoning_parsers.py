@@ -146,6 +146,15 @@ class ReasoningParser:
         previously been parsed and extracted (see constructor)
         """
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """
+        Count the number of reasoning tokens in the output.
+
+        Base implementation returns 0. Subclasses that use
+        start/end tokens for reasoning should override this.
+        """
+        return 0
+
     def prepare_structured_tag(
         self,
         original_tag: str | None,

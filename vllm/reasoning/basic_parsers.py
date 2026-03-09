@@ -150,6 +150,35 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """
+        Count tokens between start_token_id and end_token_id.
+
+        If start_token_id is not found in the output (e.g. because it was
+        added as a generation prefix in the prompt), assumes reasoning
+        starts from the beginning. If end_token_id is not found (generation
+        stopped mid-reasoning), all remaining tokens are counted.
+        """
+        start_id = self.start_token_id
+        end_id = self.end_token_id
+
+        # Check if start token is present in output token IDs.
+        # If not, the start token was likely part of the prompt
+        # (generation prefix), so reasoning starts from the beginning.
+        in_reasoning = start_id not in token_ids
+
+        count = 0
+        for tid in token_ids:
+            if tid == start_id:
+                in_reasoning = True
+                continue
+            if tid == end_id:
+                in_reasoning = False
+                continue
+            if in_reasoning:
+                count += 1
+        return count
+
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
