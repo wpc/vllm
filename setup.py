@@ -991,8 +991,12 @@ if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 # SSD KV cache offloading with io_uring (Linux-only, CPU-only extension)
+# Uses pybind11 PYBIND11_MODULE which is incompatible with Stable ABI,
+# so py_limited_api must be False.
 if sys.platform.startswith("linux"):
-    ext_modules.append(CMakeExtension(name="vllm._ssd_kv_C", optional=True))
+    _ssd_ext = CMakeExtension(name="vllm._ssd_kv_C", optional=True)
+    _ssd_ext.py_limited_api = False
+    ext_modules.append(_ssd_ext)
 
 package_data = {
     "vllm": [
