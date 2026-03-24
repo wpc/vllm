@@ -990,6 +990,10 @@ if _is_cuda():
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
+# SSD KV cache offloading with io_uring (Linux-only, CPU-only extension)
+if sys.platform.startswith("linux"):
+    ext_modules.append(CMakeExtension(name="vllm._ssd_kv_C", optional=True))
+
 package_data = {
     "vllm": [
         "py.typed",

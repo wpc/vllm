@@ -1130,3 +1130,34 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
 endif ()
+
+#
+# _ssd_kv_C extension (Linux-only, CPU-only, requires liburing)
+#
+if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_library(URING_LIB uring)
+  find_path(URING_INCLUDE_DIR liburing.h)
+
+  if (URING_LIB AND URING_INCLUDE_DIR)
+    message(STATUS "Found liburing: ${URING_LIB}")
+    message(STATUS "Enabling SSD KV cache extension.")
+
+    set(VLLM_SSD_KV_SRC
+      "csrc/ssd_kv/io_uring_engine.cpp"
+      "csrc/ssd_kv/ssd_kv_store.cpp"
+      "csrc/ssd_kv/torch_bindings.cpp")
+
+    define_extension_target(
+      _ssd_kv_C
+      DESTINATION vllm
+      LANGUAGE CXX
+      SOURCES ${VLLM_SSD_KV_SRC}
+      LIBRARIES ${URING_LIB}
+      INCLUDE_DIRECTORIES ${URING_INCLUDE_DIR}
+      USE_SABI 3
+      WITH_SOABI)
+  else()
+    message(WARNING "liburing not found, SSD KV cache extension will not be built. "
+      "Install with: apt install liburing-dev")
+  endif()
+endif()

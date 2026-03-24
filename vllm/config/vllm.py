@@ -589,6 +589,12 @@ class VllmConfig:
                 "lmcache.local_cpu": True,
                 "lmcache.max_local_cpu_size": kv_gb_per_rank,
             }
+        elif kv_offloading_backend == "ssd":
+            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            self.kv_transfer_config.kv_connector_extra_config.update({
+                "spec_name": "SSDOffloadingSpec",
+                "ssd_capacity_gb": kv_offloading_size,
+            })
 
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
