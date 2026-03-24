@@ -106,7 +106,6 @@ RUN apt-get update -y \
         sudo \
         python3-pip \
         libibverbs-dev \
-        liburing-dev \
         # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
         # as it was causing spam when compiling the CUTLASS kernels
         gcc-10 \
@@ -132,6 +131,16 @@ ENV UV_LINK_MODE=copy
 
 # Verify GCC version
 RUN gcc --version
+
+# Build liburing from source (not available in Ubuntu 20.04 focal repos)
+# Required for SSD KV cache offloading extension
+RUN git clone --depth 1 --branch liburing-2.6 \
+        https://github.com/axboe/liburing.git /tmp/liburing \
+    && cd /tmp/liburing \
+    && ./configure --prefix=/usr \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf /tmp/liburing
 
 # Ensure CUDA compatibility library is loaded
 RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
