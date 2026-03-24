@@ -543,30 +543,31 @@ class SsdGpuOffloadingHandlers:
         # Initialize SSD store (C++ backend)
         ssd_store = None
         try:
-            import vllm._ssd_kv_C as ssd_kv
+            import vllm._ssd_kv_C  # noqa: F401 — triggers REGISTER_EXTENSION
+
+            ssd_ops = torch.ops._ssd_kv_C
 
             # Create file paths for each ssd_path
             file_paths = []
             for i, path in enumerate(ssd_paths):
                 file_paths.append(f"{path}_{i}.dat")
 
-            ssd_store_handle = ssd_kv.create(
-                file_paths=file_paths,
-                num_blocks=num_ssd_blocks,
-                block_bytes=block_bytes,
-                page_size=page_size,
-                io_queue_depth=io_queue_depth,
+            ssd_store_handle = ssd_ops.create(
+                file_paths,
+                num_ssd_blocks,
+                block_bytes,
+                page_size,
+                io_queue_depth,
             )
 
-            # Wrap the C module in a simple object for the handlers
+            # Wrap torch.ops in a simple object for the handlers
             class SSDStoreWrapper:
-                def __init__(self, handle, module):
+                def __init__(self, handle, ops):
                     self._handle = handle
-                    self._mod = module
+                    self._ops = ops
 
                 def write_block(self, block_id, buffer_ptr, job_id):
-                    # For now, create a tensor view at the buffer pointer
-                    self._mod.write_blocks(
+                    self._ops.write_blocks(
                         self._handle,
                         torch.tensor([block_id], dtype=torch.int64),
                         torch.tensor([0], dtype=torch.uint8),  # placeholder
@@ -574,7 +575,7 @@ class SsdGpuOffloadingHandlers:
                     )
 
                 def read_block(self, block_id, buffer_ptr, job_id):
-                    self._mod.read_blocks(
+                    self._ops.read_blocks(
                         self._handle,
                         torch.tensor([block_id], dtype=torch.int64),
                         torch.tensor([0], dtype=torch.uint8),  # placeholder
@@ -582,12 +583,25 @@ class SsdGpuOffloadingHandlers:
                     )
 
                 def poll(self):
-                    return self._mod.poll(self._handle)
+                    # Returns tensor of shape (N, 3): [job_id, success, is_read]
+                    result = self._ops.poll(self._handle)
+                    if result.numel() == 0:
+                        return []
+                    return [
+                        (int(row[0]), bool(row[1]), bool(row[2]))
+                        for row in result
+                    ]
 
                 def wait_all(self):
-                    return self._mod.wait_all(self._handle)
+                    result = self._ops.wait_all(self._handle)
+                    if result.numel() == 0:
+                        return []
+                    return [
+                        (int(row[0]), bool(row[1]), bool(row[2]))
+                        for row in result
+                    ]
 
-            ssd_store = SSDStoreWrapper(ssd_store_handle, ssd_kv)
+            ssd_store = SSDStoreWrapper(ssd_store_handle, ssd_ops)
             logger.info(
                 "SSD KV store initialized: %d blocks, %d bytes/block, "
                 "%d files",

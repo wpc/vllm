@@ -1,18 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
-#include <torch/extension.h>
+#include <torch/library.h>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include "core/registration.h"
 #include "ssd_kv_store.h"
-
-namespace py = pybind11;
 
 namespace vllm::ssd_kv {
 
@@ -20,6 +17,7 @@ namespace vllm::ssd_kv {
 static std::unordered_map<int64_t, std::unique_ptr<SSDKVStore>> g_stores;
 static int64_t g_next_handle = 0;
 
+// Create an SSD KV store. Returns a handle (int64).
 int64_t ssd_kv_store_create(
     const std::vector<std::string>& file_paths,
     int64_t num_blocks,
@@ -44,19 +42,13 @@ void ssd_kv_store_destroy(int64_t handle) {
 }
 
 // Write blocks from a contiguous pinned CPU tensor to SSD.
-// block_ids: 1D int64 tensor of SSD block slot indices
-// src_buffer: contiguous CPU tensor (pinned memory) with all blocks' data
-//   concatenated. Size must be len(block_ids) * block_bytes.
-// job_id_start: starting job ID; each block gets job_id_start + i.
 void ssd_kv_store_write_blocks(
     int64_t handle,
     torch::Tensor block_ids,
     torch::Tensor src_buffer,
     int64_t job_id_start) {
   auto it = g_stores.find(handle);
-  if (it == g_stores.end()) {
-    throw std::runtime_error("Invalid SSD KV store handle");
-  }
+  TORCH_CHECK(it != g_stores.end(), "Invalid SSD KV store handle");
   auto& store = it->second;
 
   TORCH_CHECK(block_ids.dim() == 1 && block_ids.dtype() == torch::kInt64,
@@ -82,19 +74,13 @@ void ssd_kv_store_write_blocks(
 }
 
 // Read blocks from SSD into a contiguous pinned CPU tensor.
-// block_ids: 1D int64 tensor of SSD block slot indices
-// dst_buffer: contiguous CPU tensor (pinned memory) to receive block data.
-//   Size must be len(block_ids) * block_bytes.
-// job_id_start: starting job ID; each block gets job_id_start + i.
 void ssd_kv_store_read_blocks(
     int64_t handle,
     torch::Tensor block_ids,
     torch::Tensor dst_buffer,
     int64_t job_id_start) {
   auto it = g_stores.find(handle);
-  if (it == g_stores.end()) {
-    throw std::runtime_error("Invalid SSD KV store handle");
-  }
+  TORCH_CHECK(it != g_stores.end(), "Invalid SSD KV store handle");
   auto& store = it->second;
 
   TORCH_CHECK(block_ids.dim() == 1 && block_ids.dtype() == torch::kInt64,
@@ -120,74 +106,63 @@ void ssd_kv_store_read_blocks(
 }
 
 // Poll for completed IO operations.
-// Returns list of (job_id, success, is_read) tuples.
-py::list ssd_kv_store_poll(int64_t handle) {
+// Returns a tensor of shape (N, 3) with columns [job_id, success, is_read].
+torch::Tensor ssd_kv_store_poll(int64_t handle) {
   auto it = g_stores.find(handle);
-  if (it == g_stores.end()) {
-    throw std::runtime_error("Invalid SSD KV store handle");
-  }
+  TORCH_CHECK(it != g_stores.end(), "Invalid SSD KV store handle");
 
   auto results = it->second->poll();
-  py::list out;
-  for (const auto& r : results) {
-    out.append(py::make_tuple(
-        r.job_id, r.success, r.type == IORequestType::READ));
+  auto out = torch::empty({static_cast<int64_t>(results.size()), 3},
+                          torch::kInt64);
+  auto* out_ptr = out.data_ptr<int64_t>();
+  for (size_t i = 0; i < results.size(); i++) {
+    out_ptr[i * 3] = results[i].job_id;
+    out_ptr[i * 3 + 1] = results[i].success ? 1 : 0;
+    out_ptr[i * 3 + 2] = (results[i].type == IORequestType::READ) ? 1 : 0;
   }
   return out;
 }
 
 // Wait for all pending IO operations and return results.
-py::list ssd_kv_store_wait_all(int64_t handle) {
+torch::Tensor ssd_kv_store_wait_all(int64_t handle) {
   auto it = g_stores.find(handle);
-  if (it == g_stores.end()) {
-    throw std::runtime_error("Invalid SSD KV store handle");
-  }
+  TORCH_CHECK(it != g_stores.end(), "Invalid SSD KV store handle");
 
   auto results = it->second->wait_all();
-  py::list out;
-  for (const auto& r : results) {
-    out.append(py::make_tuple(
-        r.job_id, r.success, r.type == IORequestType::READ));
+  auto out = torch::empty({static_cast<int64_t>(results.size()), 3},
+                          torch::kInt64);
+  auto* out_ptr = out.data_ptr<int64_t>();
+  for (size_t i = 0; i < results.size(); i++) {
+    out_ptr[i * 3] = results[i].job_id;
+    out_ptr[i * 3 + 1] = results[i].success ? 1 : 0;
+    out_ptr[i * 3 + 2] = (results[i].type == IORequestType::READ) ? 1 : 0;
   }
   return out;
 }
 
-PYBIND11_MODULE(_ssd_kv_C, m) {
-  m.doc() = "SSD KV cache store with io_uring backend";
+TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
+  ops.def("create(str[] file_paths, int num_blocks, int block_bytes, "
+          "int page_size=4096, int io_queue_depth=256) -> int");
+  ops.impl("create", torch::kCPU, &ssd_kv_store_create);
 
-  m.def("create", &ssd_kv_store_create,
-        "Create an SSD KV store",
-        py::arg("file_paths"),
-        py::arg("num_blocks"),
-        py::arg("block_bytes"),
-        py::arg("page_size") = 4096,
-        py::arg("io_queue_depth") = 256);
+  ops.def("destroy(int handle) -> ()");
+  ops.impl("destroy", torch::kCPU, &ssd_kv_store_destroy);
 
-  m.def("destroy", &ssd_kv_store_destroy,
-        "Destroy an SSD KV store",
-        py::arg("handle"));
+  ops.def("write_blocks(int handle, Tensor block_ids, Tensor src_buffer, "
+          "int job_id_start) -> ()");
+  ops.impl("write_blocks", torch::kCPU, &ssd_kv_store_write_blocks);
 
-  m.def("write_blocks", &ssd_kv_store_write_blocks,
-        "Write blocks to SSD",
-        py::arg("handle"),
-        py::arg("block_ids"),
-        py::arg("src_buffer"),
-        py::arg("job_id_start"));
+  ops.def("read_blocks(int handle, Tensor block_ids, Tensor dst_buffer, "
+          "int job_id_start) -> ()");
+  ops.impl("read_blocks", torch::kCPU, &ssd_kv_store_read_blocks);
 
-  m.def("read_blocks", &ssd_kv_store_read_blocks,
-        "Read blocks from SSD",
-        py::arg("handle"),
-        py::arg("block_ids"),
-        py::arg("dst_buffer"),
-        py::arg("job_id_start"));
+  ops.def("poll(int handle) -> Tensor");
+  ops.impl("poll", torch::kCPU, &ssd_kv_store_poll);
 
-  m.def("poll", &ssd_kv_store_poll,
-        "Poll for completed IO operations",
-        py::arg("handle"));
-
-  m.def("wait_all", &ssd_kv_store_wait_all,
-        "Wait for all pending IO operations",
-        py::arg("handle"));
+  ops.def("wait_all(int handle) -> Tensor");
+  ops.impl("wait_all", torch::kCPU, &ssd_kv_store_wait_all);
 }
+
+REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
 
 }  // namespace vllm::ssd_kv
