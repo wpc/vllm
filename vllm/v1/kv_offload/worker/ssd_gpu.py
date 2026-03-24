@@ -560,46 +560,57 @@ class SsdGpuOffloadingHandlers:
                 io_queue_depth,
             )
 
-            # Wrap torch.ops in a simple object for the handlers
+            # Wrap torch.ops in a simple object for the handlers.
+            # C++ API uses raw int64 pointers (Stable ABI compatible).
             class SSDStoreWrapper:
+                _POLL_BUF_SIZE = 512
+
                 def __init__(self, handle, ops):
                     self._handle = handle
                     self._ops = ops
+                    # Pre-allocate poll output buffers
+                    self._poll_job_ids = torch.empty(
+                        self._POLL_BUF_SIZE, dtype=torch.int64
+                    )
+                    self._poll_success = torch.empty(
+                        self._POLL_BUF_SIZE, dtype=torch.int64
+                    )
+                    self._poll_is_read = torch.empty(
+                        self._POLL_BUF_SIZE, dtype=torch.int64
+                    )
 
                 def write_block(self, block_id, buffer_ptr, job_id):
-                    self._ops.write_blocks(
-                        self._handle,
-                        torch.tensor([block_id], dtype=torch.int64),
-                        torch.tensor([0], dtype=torch.uint8),  # placeholder
-                        job_id,
+                    self._ops.write_block(
+                        self._handle, block_id, buffer_ptr, job_id
                     )
 
                 def read_block(self, block_id, buffer_ptr, job_id):
-                    self._ops.read_blocks(
-                        self._handle,
-                        torch.tensor([block_id], dtype=torch.int64),
-                        torch.tensor([0], dtype=torch.uint8),  # placeholder
-                        job_id,
+                    self._ops.read_block(
+                        self._handle, block_id, buffer_ptr, job_id
                     )
 
                 def poll(self):
-                    # Returns tensor of shape (N, 3): [job_id, success, is_read]
-                    result = self._ops.poll(self._handle)
-                    if result.numel() == 0:
+                    count = self._ops.poll(
+                        self._handle,
+                        self._poll_job_ids.data_ptr(),
+                        self._poll_success.data_ptr(),
+                        self._poll_is_read.data_ptr(),
+                        self._POLL_BUF_SIZE,
+                    )
+                    if count == 0:
                         return []
                     return [
-                        (int(row[0]), bool(row[1]), bool(row[2]))
-                        for row in result
+                        (
+                            int(self._poll_job_ids[i]),
+                            bool(self._poll_success[i]),
+                            bool(self._poll_is_read[i]),
+                        )
+                        for i in range(count)
                     ]
 
                 def wait_all(self):
-                    result = self._ops.wait_all(self._handle)
-                    if result.numel() == 0:
-                        return []
-                    return [
-                        (int(row[0]), bool(row[1]), bool(row[2]))
-                        for row in result
-                    ]
+                    self._ops.wait_all(self._handle)
+                    return self.poll()
 
             ssd_store = SSDStoreWrapper(ssd_store_handle, ssd_ops)
             logger.info(
