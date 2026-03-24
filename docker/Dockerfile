@@ -106,6 +106,7 @@ RUN apt-get update -y \
         sudo \
         python3-pip \
         libibverbs-dev \
+        liburing-dev \
         # Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
         # as it was causing spam when compiling the CUTLASS kernels
         gcc-10 \
@@ -549,7 +550,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libcublas-${CUDA_VERSION_DASH} \
         # Fixes nccl_allocator requiring nccl.h at runtime
         # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        libnccl-dev \
+        # Required for SSD KV cache offloading (io_uring)
+        liburing2 && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
