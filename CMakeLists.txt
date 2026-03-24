@@ -1154,7 +1154,6 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
       SOURCES ${VLLM_SSD_KV_SRC}
       LIBRARIES ${URING_LIB}
       INCLUDE_DIRECTORIES ${URING_INCLUDE_DIR}
-      USE_SABI 3
       WITH_SOABI)
   else()
     message(WARNING "liburing not found, SSD KV cache extension will not be built. "
