@@ -681,6 +681,8 @@ class precompiled_wheel_utils:
                     "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                     "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                     "vllm/cumem_allocator.abi3.so",
+                    # SSD KV cache offloading (io_uring)
+                    "vllm/_ssd_kv_C.abi3.so",
                     # ROCm-specific libraries
                     "vllm/_rocm_C.abi3.so",
                 ]
