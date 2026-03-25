@@ -602,6 +602,16 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks, num_new_local_computed_tokens = (
                         self.kv_cache_manager.get_computed_blocks(request)
                     )
+                    if self.connector is not None:
+                        logger.debug(
+                            "Scheduler: req %s, num_computed_tokens=%d, "
+                            "num_new_local_computed_tokens=%d, "
+                            "num_tokens=%d",
+                            request.request_id,
+                            request.num_computed_tokens,
+                            num_new_local_computed_tokens,
+                            request.num_tokens,
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:

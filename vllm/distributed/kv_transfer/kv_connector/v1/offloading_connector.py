@@ -313,11 +313,25 @@ class OffloadingConnectorScheduler:
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
             # we can load less than a block, skip
+            logger.debug(
+                "Request %s: skip load, full_block_tokens=%d - "
+                "num_computed_tokens=%d < offloaded_block_size=%d",
+                request.request_id, full_block_tokens,
+                num_computed_tokens, self.offloaded_block_size,
+            )
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
         hits = self.manager.lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
+        )
+        logger.debug(
+            "Request %s: lookup from block %d, hits=%s, "
+            "num_computed_tokens=%d, num_blocks=%d, "
+            "manager has %d blocks",
+            request.request_id, start_block_idx, hits,
+            num_computed_tokens, num_blocks,
+            len(self.manager.blocks),
         )
         if hits is None:
             # indicates a lookup that should be tried later

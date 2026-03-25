@@ -3,6 +3,7 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
+from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_offload.abstract import (
     LoadStoreSpec,
@@ -11,6 +12,8 @@ from vllm.v1.kv_offload.abstract import (
     PrepareStoreOutput,
 )
 from vllm.v1.kv_offload.backend import Backend, BlockStatus
+
+logger = init_logger(__name__)
 
 
 class LRUOffloadingManager(OffloadingManager):
@@ -116,6 +119,11 @@ class LRUOffloadingManager(OffloadingManager):
                 if not block.is_ready:
                     block.ref_cnt = 0
                     stored_block_hashes.append(block_hash)
+            logger.debug(
+                "complete_store: success=%s, marked %d blocks ready, "
+                "total blocks in manager: %d",
+                success, len(stored_block_hashes), len(self.blocks),
+            )
         else:
             for block_hash in block_hashes:
                 block = self.blocks[block_hash]
