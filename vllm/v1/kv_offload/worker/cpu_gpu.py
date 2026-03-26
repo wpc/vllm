@@ -267,8 +267,10 @@ class CpuGpuOffloadingHandlers:
             except (AttributeError, NotImplementedError):
                 kv_cache_stride_order = tuple(range(len(gpu_shape)))
 
-            # permute test_shape according to stride_order
-            test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
+            # Note: gpu_shape and test_shape are both in logical dimension
+            # order (from get_kv_cache_shape). The stride_order only affects
+            # memory layout (strides), not the shape. So we do NOT permute
+            # test_shape — we use it directly to find dimension indices.
 
             # find block_size (16) dimension index
             block_size_idx = test_shape.index(16)
@@ -276,6 +278,14 @@ class CpuGpuOffloadingHandlers:
                 assert kernel_block_size == gpu_shape[block_size_idx]
             else:
                 kernel_block_size = gpu_shape[block_size_idx]
+                logger.info(
+                    "CpuGpuOffloadingHandlers: gpu_block_size=%d, "
+                    "kernel_block_size=%d, gpu_shape=%s, test_shape=%s, "
+                    "block_size_idx=%d, split_k_and_v=%s, has_layers_dim=%s",
+                    gpu_block_size, kernel_block_size,
+                    gpu_shape, test_shape, block_size_idx,
+                    split_k_and_v, has_layers_dim,
+                )
                 assert gpu_block_size % kernel_block_size == 0
 
             parsed_gpu_tensors.append((gpu_tensor, split_k_and_v))
