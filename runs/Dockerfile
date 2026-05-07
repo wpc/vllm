@@ -108,7 +108,13 @@ RUN uv pip install --system --no-deps --no-build-isolation flashinfer_python==v0
 RUN uv pip uninstall --system nvidia-nvshmem-cu13
 RUN uv pip uninstall --system nvidia-nvshmem-cu12
 RUN uv pip install --system --no-deps nvidia-nvshmem-cu${CUDA_MAJOR_VERSION}==3.4.5
-RUN uv pip install --system nixl[cu${CUDA_MAJOR_VERSION}] pandas datasets nvtx lm_eval[api]
+# Pin nixl to 1.0.0; nixl 1.0.1 added a dependency on UCX symbol
+# `ucp_device_local_mem_list_create` that is not present in our
+# overlay UCX 1.20.0 (which provides `ucp_device_mem_list_create`),
+# causing the UCX backend plugin to fail to load with
+# `undefined symbol: ucp_device_local_mem_list_create` and the
+# NIXL connector to crash with `KeyError: 'UCX'` at register_kv_caches.
+RUN uv pip install --system 'nixl[cu'${CUDA_MAJOR_VERSION}']==1.0.0' pandas datasets nvtx lm_eval[api]
 
 RUN sudo apt-get update -qq && sudo apt-get install -y -qq pkg-config libssl-dev protobuf-compiler git
 
