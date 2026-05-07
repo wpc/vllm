@@ -2034,7 +2034,16 @@ class Scheduler(SchedulerInterface):
                     req_num_computed_tokens - request.num_computed_tokens
                 )
                 total_affected_tokens += num_affected_tokens
-                request.num_external_computed_tokens -= num_affected_tokens
+                # The bare `-= num_affected_tokens` could drive this negative
+                # when the invalidated range exceeds the external-KV portion
+                # (e.g. local cache contributed part of the prefix, or the
+                # async allocation included non-external tail blocks). A
+                # negative value later crashes the Prometheus counter with
+                # "Counters can only be incremented by non-negative amounts."
+                # (metrics/loggers.py counter_connector_prefix_cache_hits).
+                request.num_external_computed_tokens -= min(
+                    num_affected_tokens, request.num_external_computed_tokens
+                )
                 # collect invalid block and all downstream dependent blocks
                 if evict_blocks:
                     blocks_to_evict.update(req_block_ids[idx:])

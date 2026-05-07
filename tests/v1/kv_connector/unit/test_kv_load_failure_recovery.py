@@ -271,6 +271,82 @@ def test_sync_load_failure_with_shared_blocks(
 @pytest.mark.parametrize(
     "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
     [
+        # Truncation at idx 0 removes all blocks; with the old
+        # `-= num_affected_tokens` formula, num_external_computed_tokens
+        # would underflow whenever num_external_blocks < num_prompt_blocks.
+        (100, 99, {0}),
+        (100, 50, {0}),
+        (100, 50, {25}),
+        (100, 50, {49}),
+        # Truncation at idx 60 keeps the external prefix mostly intact.
+        (100, 50, {60}),
+    ],
+)
+def test_async_load_failure_external_count_invariant(
+    scheduler: Scheduler,
+    num_prompt_blocks: int,
+    num_external_computed_blocks: int,
+    invalid_block_idxs: set[int],
+):
+    """Regression: num_external_computed_tokens must stay non-negative after
+    async-load block invalidation. A negative value here later crashes the
+    Prometheus counter with
+    ``Counters can only be incremented by non-negative amounts.``
+    """
+    assert num_prompt_blocks >= num_external_computed_blocks
+
+    num_prompt_tokens = num_prompt_blocks * scheduler.block_size
+    num_external_computed_tokens = num_external_computed_blocks * scheduler.block_size
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+    scheduler.connector = Mock()
+    scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
+    )
+    scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert request.num_external_computed_tokens == num_external_computed_tokens
+
+    # Trigger an async-load failure that truncates the computed tokens.
+    (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
+    invalid_block_ids = {req_block_ids[i] for i in invalid_block_idxs}
+    model_runner_output = create_model_runner_output(
+        reqs=[],
+        finished_recving=set(),
+        invalid_block_ids=invalid_block_ids,
+        use_eos=True,
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    min_invalid_block_idx = min(invalid_block_idxs)
+    expected_num_computed = min_invalid_block_idx * scheduler.block_size
+    assert request.num_computed_tokens == expected_num_computed
+
+    # Primary invariant: never negative (would crash Prometheus counter).
+    assert request.num_external_computed_tokens >= 0, (
+        f"num_external_computed_tokens went negative: "
+        f"{request.num_external_computed_tokens}"
+    )
+    # For the async-load path, req_num_computed_tokens used by
+    # _update_requests_with_invalid_blocks equals the full allocation
+    # (len(req_block_ids) * block_size = num_prompt_tokens).
+    num_affected_tokens = num_prompt_tokens - expected_num_computed
+    expected_num_external = max(
+        0, num_external_computed_tokens - num_affected_tokens
+    )
+    assert request.num_external_computed_tokens == expected_num_external
+
+
+@pytest.mark.parametrize(
+    "num_prompt_blocks,num_external_computed_blocks,invalid_block_idxs",
+    [
         (100, 99, {0, 50, 98}),
         (100, 99, {98, 50, 0}),
     ],
