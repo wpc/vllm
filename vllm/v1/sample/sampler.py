@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -13,6 +14,8 @@ from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+
+logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 
@@ -101,6 +104,59 @@ class Sampler(nn.Module):
         # This conversion is necessary because FlashInfer sampling operations
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
+
+        # WPC DEBUG: per-sampler-step zero-run detection with periodic heartbeat.
+        # - WPC_ZERO_RUN fires per detected request (per-step, only when corruption hits).
+        # - WPC_SAMPLER_HEARTBEAT fires every N steps with clean/bad step counts since
+        #   last heartbeat. Bounded log volume regardless of throughput.
+        # Knob: WPC_SAMPLER_HEARTBEAT_STEPS env var (default 100).
+        import os
+        if not getattr(Sampler, "_wpc_init", False):
+            Sampler._wpc_init = True
+            Sampler._wpc_step_count = 0
+            Sampler._wpc_clean_since_hb = 0
+            Sampler._wpc_bad_since_hb = 0
+            Sampler._wpc_hb_interval = int(
+                os.environ.get("WPC_SAMPLER_HEARTBEAT_STEPS", "100")
+            )
+            logger.warning(
+                "WPC_PATCH_LOADED: sampler.py with ZERO_RUN detection active, "
+                "heartbeat every %d steps",
+                Sampler._wpc_hb_interval,
+            )
+        # Cheap CPU prefilter — only do the D2H transfer when there's a candidate.
+        batch_size = len(sampling_metadata.output_token_ids)
+        candidates = [
+            i for i, prev in enumerate(sampling_metadata.output_token_ids)
+            if len(prev) >= 3 and prev[-1] == 0 and prev[-2] == 0 and prev[-3] == 0
+        ]
+        zero_run_hits = []
+        if candidates:
+            sampled_cpu = sampled.tolist()
+            for i in candidates:
+                if sampled_cpu[i] == 0:
+                    prev = sampling_metadata.output_token_ids[i]
+                    zero_run_hits.append((i, len(prev) + 1, prev[-7:] + [0]))
+        if zero_run_hits:
+            Sampler._wpc_bad_since_hb += 1
+            for i, output_len, last_tokens in zero_run_hits:
+                logger.warning(
+                    "WPC_ZERO_RUN: batch_size=%d req_idx=%d output_len=%d last_tokens=%s",
+                    batch_size, i, output_len, last_tokens,
+                )
+        else:
+            Sampler._wpc_clean_since_hb += 1
+        Sampler._wpc_step_count += 1
+        if Sampler._wpc_step_count % Sampler._wpc_hb_interval == 0:
+            logger.warning(
+                "WPC_SAMPLER_HEARTBEAT: total_steps=%d clean=%d bad=%d batch_size=%d",
+                Sampler._wpc_step_count,
+                Sampler._wpc_clean_since_hb,
+                Sampler._wpc_bad_since_hb,
+                batch_size,
+            )
+            Sampler._wpc_clean_since_hb = 0
+            Sampler._wpc_bad_since_hb = 0
 
         if num_logprobs is None:
             logprobs_tensors = None

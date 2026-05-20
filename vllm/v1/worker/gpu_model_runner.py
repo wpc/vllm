@@ -2861,6 +2861,13 @@ class GPUModelRunner(
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
 
+        # WPC DEBUG: NaN/Inf detector for the decode step. Gated by
+        # WPC_NANINF_CHECK=1 (default off). Runs cheap any() reductions on
+        # hidden_states and logits each step; on a hit, also walks the
+        # KV cache layer tensors and logs per-request output_len so we can
+        # localize which request triggered the numerical corruption.
+        self._wpc_log_naninf(logits, hidden_states)
+
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
             self.discard_request_mask.np[:num_reqs]
@@ -4409,6 +4416,109 @@ class GPUModelRunner(
             return num_nans_in_logits
         except IndexError:
             return {}
+
+    def _wpc_log_naninf(
+        self,
+        logits: "torch.Tensor | None",
+        hidden_states: "torch.Tensor | None",
+    ) -> None:
+        """WPC DEBUG: detect NaN/Inf in model output + walk KV on hit.
+
+        Gated by env WPC_NANINF_CHECK=1 (default off). When on, runs two
+        cheap `any()` reductions per step. On a hit, runs per-request and
+        per-KV-layer reductions and logs a single line per request and a
+        single line per KV layer to make triage tractable.
+        """
+        import os
+        if not getattr(self, "_wpc_naninf_init", False):
+            self._wpc_naninf_init = True
+            self._wpc_naninf_enabled = os.environ.get(
+                "WPC_NANINF_CHECK", "0"
+            ) in ("1", "true", "TRUE")
+            self._wpc_naninf_step = 0
+            if self._wpc_naninf_enabled:
+                logger.warning(
+                    "WPC_NANINF_PATCH_LOADED: per-step NaN/Inf check active"
+                )
+        if not self._wpc_naninf_enabled:
+            return
+        self._wpc_naninf_step += 1
+        step = self._wpc_naninf_step
+
+        # Cheap reductions: one bool per tensor.
+        hs_bad = False
+        lg_bad = False
+        try:
+            if hidden_states is not None:
+                hs_bad = bool(
+                    hidden_states.isnan().any().item()
+                    or hidden_states.isinf().any().item()
+                )
+            if logits is not None:
+                lg_bad = bool(
+                    logits.isnan().any().item() or logits.isinf().any().item()
+                )
+        except Exception as e:
+            logger.warning("WPC_NANINF_CHECK_ERR step=%d err=%s", step, e)
+            return
+        if not (hs_bad or lg_bad):
+            return
+
+        # Heartbeat-style summary so the log is greppable even when the
+        # downstream per-request detail fails / is racy.
+        logger.warning(
+            "WPC_NANINF_INPUT step=%d hidden_bad=%s logits_bad=%s",
+            step, hs_bad, lg_bad,
+        )
+
+        # Per-request detail using the existing per-row sum helper.
+        try:
+            req_ids = list(self.input_batch.req_ids)
+            req_idx = self.input_batch.req_id_to_index
+            if logits is not None:
+                nan_per = logits.isnan().sum(dim=-1).cpu().numpy()
+                inf_per = logits.isinf().sum(dim=-1).cpu().numpy()
+                for req_id in req_ids:
+                    i = req_idx.get(req_id)
+                    if i is None or i >= logits.shape[0]:
+                        continue
+                    n, m = int(nan_per[i]), int(inf_per[i])
+                    if n == 0 and m == 0:
+                        continue
+                    # output_len = how many tokens this request has generated
+                    output_len = -1
+                    try:
+                        req = getattr(self, "requests", {}).get(req_id)
+                        if req is not None:
+                            output_len = int(getattr(req, "num_output_tokens", -1))
+                    except Exception:
+                        pass
+                    logger.warning(
+                        "WPC_NANINF_REQ step=%d req_id=%s req_idx=%d "
+                        "output_len=%d nan_logits=%d inf_logits=%d",
+                        step, req_id, i, output_len, n, m,
+                    )
+        except Exception as e:
+            logger.warning("WPC_NANINF_REQ_ERR step=%d err=%s", step, e)
+
+        # KV-cache spot check: per-layer any() bool. Only on hit so cost
+        # is paid rarely. Walks self.kv_caches if it exists.
+        try:
+            kv_caches = getattr(self, "kv_caches", None)
+            if kv_caches:
+                for layer_idx, kv in enumerate(kv_caches):
+                    t = kv if isinstance(kv, torch.Tensor) else None
+                    if t is None:
+                        continue
+                    kn = bool(t.isnan().any().item())
+                    ki = bool(t.isinf().any().item())
+                    if kn or ki:
+                        logger.warning(
+                            "WPC_NANINF_KV step=%d layer=%d kv_nan=%s kv_inf=%s",
+                            step, layer_idx, kn, ki,
+                        )
+        except Exception as e:
+            logger.warning("WPC_NANINF_KV_ERR step=%d err=%s", step, e)
 
     @contextmanager
     def maybe_randomize_inputs(

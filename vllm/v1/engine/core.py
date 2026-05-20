@@ -315,6 +315,33 @@ class EngineCore:
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
 
+        # WPC DEBUG: capture per-request state at abort time. Tests the
+        # hypothesis that abort-driven KV block release races a concurrent
+        # request landing on the same blocks. Gated by WPC_ABORT_DEBUG=1.
+        import os
+        if os.environ.get("WPC_ABORT_DEBUG", "0") in ("1", "true", "TRUE"):
+            try:
+                batch_size_at_abort = len(getattr(self.scheduler, "requests", {}))
+                for rid in request_ids:
+                    req = getattr(self.scheduler, "requests", {}).get(rid)
+                    if req is None:
+                        logger.warning(
+                            "WPC_REQ_ABORT req_id=%s state=unknown_not_in_scheduler "
+                            "output_len=-1 batch_size_at_abort=%d",
+                            rid, batch_size_at_abort,
+                        )
+                        continue
+                    state = getattr(getattr(req, "status", None), "name", "unknown")
+                    output_len = int(getattr(req, "num_output_tokens", -1))
+                    num_computed = int(getattr(req, "num_computed_tokens", -1))
+                    logger.warning(
+                        "WPC_REQ_ABORT req_id=%s state=%s output_len=%d "
+                        "num_computed_tokens=%d batch_size_at_abort=%d",
+                        rid, state, output_len, num_computed, batch_size_at_abort,
+                    )
+            except Exception as e:
+                logger.warning("WPC_REQ_ABORT_ERR err=%s", e)
+
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
