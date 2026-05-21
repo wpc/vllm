@@ -2848,6 +2848,7 @@ class GPUModelRunner(
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        sample_hidden_states: torch.Tensor | None = None,
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
@@ -2863,10 +2864,12 @@ class GPUModelRunner(
 
         # WPC DEBUG: NaN/Inf detector for the decode step. Gated by
         # WPC_NANINF_CHECK=1 (default off). Runs cheap any() reductions on
-        # hidden_states and logits each step; on a hit, also walks the
-        # KV cache layer tensors and logs per-request output_len so we can
-        # localize which request triggered the numerical corruption.
-        self._wpc_log_naninf(logits, hidden_states)
+        # the SAMPLE-position hidden state (rows that feed the LM head for
+        # active requests; equals hidden_states[logits_indices]) and logits
+        # each step; on a hit, also walks the KV cache layer tensors and
+        # logs per-request output_len so we can localize which request
+        # triggered the numerical corruption.
+        self._wpc_log_naninf(logits, sample_hidden_states)
 
         num_reqs = self.input_batch.num_reqs
         discard_sampled_tokens_req_indices = np.nonzero(
@@ -3716,6 +3719,7 @@ class GPUModelRunner(
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
+                sample_hidden_states,
             )
 
         if propose_drafts_after_bookkeeping:
@@ -4420,14 +4424,17 @@ class GPUModelRunner(
     def _wpc_log_naninf(
         self,
         logits: "torch.Tensor | None",
-        hidden_states: "torch.Tensor | None",
+        sample_hidden_states: "torch.Tensor | None",
     ) -> None:
         """WPC DEBUG: detect NaN/Inf in model output + walk KV on hit.
 
         Gated by env WPC_NANINF_CHECK=1 (default off). When on, runs two
-        cheap `any()` reductions per step. On a hit, runs per-request and
-        per-KV-layer reductions and logs a single line per request and a
-        single line per KV layer to make triage tractable.
+        cheap `any()` reductions per step. The hidden-state check is
+        scoped to `sample_hidden_states` — only the rows that feed the LM
+        head for ACTIVE requests (= hidden_states[logits_indices]) — so
+        Inf/NaN in unused padding/dummy positions does not trigger a
+        false positive. On a hit, runs per-request and per-KV-layer
+        reductions and logs a single line per affected request / layer.
         """
         import os
         if not getattr(self, "_wpc_naninf_init", False):
@@ -4438,7 +4445,8 @@ class GPUModelRunner(
             self._wpc_naninf_step = 0
             if self._wpc_naninf_enabled:
                 logger.warning(
-                    "WPC_NANINF_PATCH_LOADED: per-step NaN/Inf check active"
+                    "WPC_NANINF_PATCH_LOADED: per-step NaN/Inf check active "
+                    "(scope=sample_hidden_states+logits)"
                 )
         if not self._wpc_naninf_enabled:
             return
@@ -4446,13 +4454,13 @@ class GPUModelRunner(
         step = self._wpc_naninf_step
 
         # Cheap reductions: one bool per tensor.
-        hs_bad = False
+        shs_bad = False
         lg_bad = False
         try:
-            if hidden_states is not None:
-                hs_bad = bool(
-                    hidden_states.isnan().any().item()
-                    or hidden_states.isinf().any().item()
+            if sample_hidden_states is not None and sample_hidden_states.numel() > 0:
+                shs_bad = bool(
+                    sample_hidden_states.isnan().any().item()
+                    or sample_hidden_states.isinf().any().item()
                 )
             if logits is not None:
                 lg_bad = bool(
@@ -4461,14 +4469,14 @@ class GPUModelRunner(
         except Exception as e:
             logger.warning("WPC_NANINF_CHECK_ERR step=%d err=%s", step, e)
             return
-        if not (hs_bad or lg_bad):
+        if not (shs_bad or lg_bad):
             return
 
         # Heartbeat-style summary so the log is greppable even when the
         # downstream per-request detail fails / is racy.
         logger.warning(
-            "WPC_NANINF_INPUT step=%d hidden_bad=%s logits_bad=%s",
-            step, hs_bad, lg_bad,
+            "WPC_NANINF_INPUT step=%d sample_hs_bad=%s logits_bad=%s",
+            step, shs_bad, lg_bad,
         )
 
         # Per-request detail using the existing per-row sum helper.
