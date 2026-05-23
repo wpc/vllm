@@ -296,6 +296,25 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         )
         self.reqs_to_recv[request_id] = req
 
+        # WPC DEBUG: log incoming KV recv enqueue so we can correlate first-NaN
+        # events to the KV transfer that fed the request. Gated by env so it's
+        # default-off; one line per inbound request.
+        import os
+        if os.environ.get("WPC_NIXL_DEBUG", "0") in ("1", "true", "TRUE"):
+            import time
+            req._wpc_recv_enqueue_ts = time.monotonic()
+            logger.warning(
+                "WPC_NIXL_RECV req=%s remote_req=%s remote_engine=%s "
+                "remote_host=%s remote_port=%s n_blocks=%d at=%.3f",
+                request_id,
+                kv_transfer_params.get("remote_request_id"),
+                kv_transfer_params.get("remote_engine_id"),
+                kv_transfer_params.get("remote_host"),
+                kv_transfer_params.get("remote_port"),
+                len(local_block_ids),
+                req._wpc_recv_enqueue_ts,
+            )
+
 
 class NixlConnector(KVConnectorBase_V1):
     def __init__(
@@ -1896,6 +1915,25 @@ class NixlConnectorWorker:
                 len(done_sending),
                 len(done_recving),
             )
+
+        # WPC DEBUG: log per-request recv completion so we can pair with the
+        # WPC_NIXL_RECV enqueue entry and learn the KV-transfer latency for
+        # the request that lands in a corrupted-NaN decode step.
+        import os
+        if (
+            os.environ.get("WPC_NIXL_DEBUG", "0") in ("1", "true", "TRUE")
+            and done_recving
+        ):
+            import time
+            now = time.monotonic()
+            for req_id in done_recving:
+                meta = self._recving_metadata.get(req_id)
+                enq = getattr(meta, "_wpc_recv_enqueue_ts", None) if meta else None
+                ms = -1.0 if enq is None else (now - enq) * 1000.0
+                logger.warning(
+                    "WPC_NIXL_DONE rank=%s req=%s ms_since_enqueue=%.1f",
+                    self.tp_rank, req_id, ms,
+                )
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         for req_id in done_recving:
